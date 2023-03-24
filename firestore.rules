@@ -1,0 +1,205 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // === 【認証】 === //
+    // Condition1: 認証済みであり、かつ、メールアドレスが検証済みであるか
+    function isAuthenticated() {
+      return request.auth != null && request.auth.token.email_verified;
+    }
+
+    // === 【認可】テナントベースのアクセス制御 === //
+    // Condition2: Condition1を満たし、かつ、「現在ログインしているテナント」かどうか
+    function isCurrentTenant(tenantId) {
+      return isAuthenticated() && request.auth.token.currentTenantId == tenantId;
+    }
+
+    // === 【認可】テナントかつロールベースのアクセス制御 === //
+    // Condition3-1: Condition2を満たし、かつ、当該テナントに対して有効なロールを保持しているか(ロール別)
+    function isApplicationUser(tenantId) {
+      // 今回のロールは上位が下位を包含するので、この判定はアプリ利用者 or アプリ管理者 or テナント管理者を判定する
+      return isCurrentTenant(tenantId) && get(/databases/$(database)/documents/tenantUsers/$(request.auth.uid)/tenants/$(tenantId)).data.role in ['applicationUser', 'applicationManager', 'tenantManager'];
+    }
+    function isApplicationManager(tenantId) {
+      // 同上
+      return isCurrentTenant(tenantId) && get(/databases/$(database)/documents/tenantUsers/$(request.auth.uid)/tenants/$(tenantId)).data.role in ['applicationManager', 'tenantManager'];
+    }
+    function isTenantManager(tenantId) {
+      return isCurrentTenant(tenantId) && get(/databases/$(database)/documents/tenantUsers/$(request.auth.uid)/tenants/$(tenantId)).data.role == 'tenantManager';
+    }
+
+    // === 【認可】テナントかつ個人ベースのアクセス制御 === //
+    // Condition3-2. Condition2. を満たし、かつ、自分自身のデータかどうか
+    function isOwnData(tenantId, docId) {
+      return  isCurrentTenant(tenantId) && request.auth.uid == docId;
+    }
+
+    function isValidUpdated() {
+      return
+        // _updatedAt属性にはサーバー生成タイムスタンプがセットされていること
+        request.resource.data._updatedAt == request.time &&
+        // _updatedBy属性には操作者のUIDがセットされていること
+        request.resource.data._updatedBy == request.auth.uid &&
+        // _createdAt/_createdBy属性は変更されていないこと
+        request.resource.data._createdAt == resource.data._createdAt &&
+        request.resource.data._createdBy == resource.data._createdBy;
+    }
+
+    function isValidCreated() {
+      return
+        // _updatedAt属性にはサーバー生成タイムスタンプがセットされていること
+        request.resource.data._updatedAt == request.time &&
+        // _updatedBy属性には操作者のUIDがセットされていること
+        request.resource.data._updatedBy == request.auth.uid &&
+        // _createdAt属性にはサーバー生成タイムスタンプがセットされていること
+        request.resource.data._createdAt == request.time &&
+        // _createdBy属性には操作者のUIDがセットされていること
+        request.resource.data._createdBy == request.auth.uid
+    }
+
+    function isValidUpdateUser() {
+      return
+        // Firestoreから直接変更する場合、emailとisActiveフィールドは変更不可
+        request.resource.data.email== resource.data.email &&
+        request.resource.data.isActive == resource.data.isActive;
+    }
+
+    function isValidSetInformation(tenantId) {
+      return
+        // タイトルは必須かつ25文字以内
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 25 &&
+        // お知らせの本文は任意だが400文字以内
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 400 &&
+        // publisherNameはuserドキュメントのnameフィールドと一致している
+        request.resource.data.publisherName == get(/databases/$(database)/documents/tenants/$(tenantId)/users/$(request.auth.uid)).data.name &&
+        // 公開状態はboolean
+        request.resource.data.isPublished is bool &&
+        // 添付ファイルはstringのlist
+        request.resource.data.attachedFiles is list
+    }
+
+    function isValidSetMessage(tenantId) {
+      return
+        // 本文は必須かつ100文字以内
+        request.resource.data.body is string &&
+        request.resource.data.body.size() > 0 &&
+        request.resource.data.body.size() <= 100 &&
+        // publisherNameはuserドキュメントのnameフィールドと一致している
+        request.resource.data.publisherName == get(/databases/$(database)/documents/tenants/$(tenantId)/users/$(request.auth.uid)).data.name
+    }
+
+    function isValidSetSafetyConfirmation() {
+      return
+        // タイトルは必須かつ25文字以内
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0 &&
+        request.resource.data.title.size() <= 25 &&
+        // 依頼文は任意だが150文字以内
+        request.resource.data.body is string &&
+        request.resource.data.body.size() <= 150 &&
+        // 災害種別は以下の3種類のいずれか
+        request.resource.data.hazardType is string &&
+        request.resource.data.hazardType in ['hazard_quake', 'hazard_water', 'hazard_other'] &&
+        // 回答期限の形式はYYYY/MM/DD(簡易的)
+        request.resource.data.dueDate is string &&
+        request.resource.data.dueDate.matches('[0-9]{4}/[0-9]{2}/[0-9]{2}')
+    }
+
+    function isValidSetSafetyConfirmationAnswer(tenantId) {
+      return
+        // 安否状況は以下の3種類のいずれか
+        request.resource.data.safetyStatus is string &&
+        request.resource.data.safetyStatus in ['安全', '軽傷', '重傷'] &&
+        // 連絡事項は任意だが30文字以内
+        request.resource.data.memo is string &&
+        request.resource.data.memo.size() <= 30 &&
+        // locationSnapshotはuserドキュメントのlocationフィールドと一致している
+        request.resource.data.locationSnapshot == get(/databases/$(database)/documents/tenants/$(tenantId)/users/$(request.auth.uid)).data.location &&
+        // nameSnapshotはuserドキュメントのnameフィールドと一致している
+        request.resource.data.nameSnapshot == get(/databases/$(database)/documents/tenants/$(tenantId)/users/$(request.auth.uid)).data.name
+    }
+
+    //
+    // ルート直下の（テナントに依存しない）コレクション
+    //
+    match /tenantUsers/{uid} {
+      match /tenants/{tenantId} {
+        allow get: if
+          isAuthenticated() &&
+          // 自テナントのメンバーのロールは取得可能（ユーザー情報の変更時に参照するため）
+          (
+            request.auth.uid == uid ||
+            request.auth.token.currentTenantId == tenantId
+          )
+        allow list: if isAuthenticated() && request.auth.uid == uid
+      }
+    }
+
+    //
+    // tenants配下の（テナントに依存する）コレクション
+    //
+    match /tenants/{tenantId} {
+      match /users/{userId} {
+        allow get: if isOwnData(tenantId, userId) || isTenantManager(tenantId)
+        allow list: if isApplicationManager(tenantId)
+        allow update: if isOwnData(tenantId, userId) && isValidUpdated() && isValidUpdateUser()
+      }
+
+      match /informations/{informationId} {
+        allow get, list: if
+          isApplicationManager(tenantId) ||
+          // applicationUserは公開済みのデータのみ表示可能
+          (isApplicationUser(tenantId) && resource.data.isPublished)
+        allow create: if
+          isValidCreated() &&
+          isValidSetInformation(tenantId) &&
+          isApplicationManager(tenantId)
+        allow update: if
+          isValidUpdated() &&
+          isValidSetInformation(tenantId) &&
+          isApplicationManager(tenantId)
+      }
+
+      match /messages/{messageId} {
+        allow list: if
+          isApplicationUser(tenantId)
+        allow create: if
+          isValidCreated() &&
+          isValidSetMessage(tenantId) &&
+          isApplicationUser(tenantId)
+      }
+
+      match /safetyConfirmations/{safetyConfirmationId} {
+        allow list: if isApplicationUser(tenantId)
+        allow get: if isApplicationManager(tenantId)
+        allow create: if
+          isApplicationManager(tenantId) &&
+          isValidCreated() &&
+          isValidSetSafetyConfirmation()
+        allow update: if
+          isApplicationManager(tenantId) &&
+          isValidUpdated() &&
+          isValidSetSafetyConfirmation()
+
+
+        match /answers/{answerId} {
+          allow get: if
+            isOwnData(tenantId, answerId)
+          allow list: if
+            isApplicationManager(tenantId)
+          allow create: if
+            isOwnData(tenantId, answerId) &&
+            isValidCreated() &&
+            isValidSetSafetyConfirmationAnswer(tenantId)
+          allow update: if
+            isOwnData(tenantId, answerId)  &&
+            isValidUpdated() &&
+            isValidSetSafetyConfirmationAnswer(tenantId)
+        }
+
+      }
+    }
+  }
+}

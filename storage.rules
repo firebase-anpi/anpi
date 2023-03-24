@@ -1,0 +1,42 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // === 【認証】 === //
+    // Condition1: 認証済みであり、かつ、メールアドレスが検証済みであるか
+    function isAuthenticated() {
+      return request.auth != null && request.auth.token.email_verified;
+    }
+
+    // === 【認可】テナントベースのアクセス制御 === //
+    // Condition2: Condition1を満たし、かつ、「現在ログインしているテナント」かどうか
+    function isCurrentTenant(tenantId) {
+      return isAuthenticated() && request.auth.token.currentTenantId == tenantId;
+    }
+
+    // === 【認可】テナントかつロールベースのアクセス制御 === //
+    // Condition3: Condition2を満たし、かつ、当該テナントに対して有効なロールを保持しているか(ロール別)
+    // [Note] Storage側からFirestore上のデータを参照（cross-service Security Rule）し、認可情報を取得している
+    // ref: https://firebase.blog/posts/2022/09/announcing-cross-service-security-rules
+    function isApplicationUser(tenantId) {
+      return
+        isCurrentTenant(tenantId) &&
+        firestore.get(/databases/(default)/documents/tenantUsers/$(request.auth.uid)/tenants/$(tenantId)).data.role in ['applicationUser', 'applicationManager', 'tenantManager'];
+    }
+    function isApplicationManager(tenantId) {
+      return
+        isCurrentTenant(tenantId) &&
+        firestore.get(/databases/(default)/documents/tenantUsers/$(request.auth.uid)/tenants/$(tenantId)).data.role in ['applicationManager', 'tenantManager'];
+    }
+
+    // [Note] Firestore側とフォルダ構成は合わせておいた方が管理はしやすい
+    match /tenants/{tenantId}/informations/{informationId}/{fileId} {
+      allow get: if isApplicationManager(tenantId) ||
+        (
+          isApplicationUser(tenantId) &&
+          // applicationUserは公開済みのデータのみ取得可能
+          firestore.get(/databases/(default)/documents/tenants/$(tenantId)/informations/$(informationId)).data.isPublished
+        );
+      allow create, delete: if isApplicationManager(tenantId);
+    }
+  }
+}
