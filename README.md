@@ -17,7 +17,7 @@
 本サンプルアプリの動作には、以下のソフトウェアが必要になります。
 - Node.js (v16)
 - yarn
-- firebase-tools
+- [Firebase CLI (firebase-tools)](https://firebase.google.com/docs/cli?hl=ja)
 
 ### パッケージのインストール
 
